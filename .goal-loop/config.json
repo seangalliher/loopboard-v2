@@ -1,0 +1,67 @@
+{
+  "models": {
+    "orchestrator": "claude-sonnet-5.5",
+    "architect": "claude-sonnet-5.5",
+    "builder": "claude-sonnet-5.5",
+    "reviewer": "gpt-6.1-sol",
+    "reviewerFallback": "gpt-6-luna"
+  },
+  "effort": {
+    "orchestrator": "high",
+    "architect": "max",
+    "builder": "high",
+    "reviewer": "high",
+    "deepReviewer": "max"
+  },
+  "gate": {
+    "command": "npm test",
+    "timeoutMinutes": 15
+  },
+  "tests": {
+    "focused": "npx vitest run <test file>"
+  },
+  "review": {
+    "firstRoundMinutes": 15,
+    "deltaRoundMinutes": 8
+  },
+  "commands": {
+    "timeoutMinutes": 10
+  },
+  "caps": {
+    "maxIssuesPerPlan": 10,
+    "maxBatchesPerRun": 8,
+    "maxBatchSize": 3,
+    "maxReviewRounds": 3,
+    "maxDiscoveredIssuesPerRun": 2
+  },
+  "github": {
+    "branchPrefix": "goal-loop/",
+    "mergePolicy": "agent-after-green",
+    "labels": {
+      "queue": "goal-loop",
+      "inProgress": "goal-loop:in-progress",
+      "needsHuman": "goal-loop:needs-human"
+    }
+  },
+  "keepAlive": {
+    "port": 47811,
+    "thresholdMiB": 25
+  },
+  "ralph": {
+    "copilotCommand": "copilot",
+    "ghCommand": "gh",
+    "maxIterations": 12,
+    "stallLimit": 3,
+    "iterationTimeoutMinutes": 120,
+    "pauseSeconds": 30,
+    "maxAiCreditsPerRun": 0,
+    "denyTools": [
+      "shell(gh repo delete)",
+      "shell(gh repo edit)",
+      "shell(gh secret)",
+      "shell(gh auth)",
+      "shell(git push --force)"
+    ],
+    "extraArgs": []
+  }
+}

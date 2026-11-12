@@ -1,0 +1,11 @@
+# goal-loop: machine-local loop state (not part of the project)
+handoff.md
+PLAN.md
+prompts/
+receipts/
+STOP
+session-log-status.json
+trim-request.json
+trim-history/
+PLAN.approved.json
+ralph/

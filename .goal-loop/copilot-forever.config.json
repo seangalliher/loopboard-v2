@@ -1,0 +1,19 @@
+{
+  "repoFolder": "..",
+  "agentFile": ".github/agents/orchestrator.agent.md",
+  "instanceName": "copilot-forever-loopboard-v2",
+  "host": {
+    "codeCommand": "code",
+    "port": 47811
+  },
+  "trim": {
+    "thresholdMiB": 25
+  },
+  "files": {
+    "status": ".goal-loop/session-log-status.json",
+    "request": ".goal-loop/trim-request.json",
+    "history": ".goal-loop/trim-history",
+    "handoff": ".goal-loop/handoff.md"
+  },
+  "continueText": "Continue. Your session log was just trimmed to its latest compaction after you stopped for a log trim. Check .goal-loop/STOP, then resume from the latest addendum in {handoff}."
+}
