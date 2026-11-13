@@ -10,10 +10,12 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test:unit": "vitest run",
-    "test": "npm run lint && npm run typecheck && npm run test:unit"
+    "test:e2e": "playwright test",
+    "test": "npm run lint && npm run typecheck && npm run test:unit && npm run test:e2e"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.65.0",
     "@types/node": "^24",
     "eslint": "^10.14.0",
     "globals": "^17.14.0",
