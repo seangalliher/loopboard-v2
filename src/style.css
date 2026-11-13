@@ -34,13 +34,41 @@ h1 {
 
 .column-header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: baseline;
+  gap: 0.25rem 0.75rem;
 }
 
 .column-header h2,
 .count {
   margin: 0;
+}
+
+.wip-limit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.375rem;
+  max-width: 100%;
+}
+
+.wip-input {
+  box-sizing: border-box;
+  width: 5rem;
+  max-width: 100%;
+}
+
+.wip-warning {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.wip-warning:not(:empty) {
+  margin-top: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border: 2px solid currentColor;
+  font-weight: bold;
 }
 
 .add-form,

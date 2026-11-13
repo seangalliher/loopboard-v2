@@ -1,4 +1,4 @@
-import { COLUMNS, addCard, deleteCard, editCard, emptyBoard, moveCard, type Board, type Card, type ColumnId } from '../board';
+import { COLUMNS, addCard, deleteCard, editCard, emptyBoard, isOverLimit, isValidWipLimit, moveCard, setWipLimit, type Board, type Card, type ColumnId } from '../board';
 import { loadBoard, saveBoard } from '../storage';
 
 export type AppDeps = {
@@ -27,6 +27,18 @@ function errorLine(): HTMLParagraphElement {
   const element = make('p', 'form-error');
   element.setAttribute('aria-live', 'assertive');
   return element;
+}
+
+// What a limit box holds, as the value to check: null for an empty box (no limit), else its number. A box holding text that is
+// not a number (a lone "-" or "e") also reports the value '' but sets validity.badInput, which is not "no limit": NaN.
+function limitIn(input: HTMLInputElement): number | null {
+  if (input.validity.badInput) return Number.NaN;
+  return input.value === '' ? null : Number(input.value);
+}
+
+// Whether two boards hold the same cards in every column, whatever their limits.
+function sameCards(a: Board, b: Board): boolean {
+  return COLUMNS.every(({ id }) => JSON.stringify(a.columns[id].cards) === JSON.stringify(b.columns[id].cards));
 }
 
 // The three inputs shared by the add form and the edit form.
@@ -94,14 +106,43 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
     heading.id = `${id}-heading`;
     heading.tabIndex = -1;
     const count = make('p', 'count');
+    const limit = make('input', 'wip-input');
+    limit.type = 'number';
+    limit.min = '1';
+    limit.step = '1';
+    limit.id = `${id}-wip`;
+    limit.setAttribute('aria-label', `WIP limit for ${title}`);
+    const caption = make('label', 'wip-limit');
+    caption.append(make('span', '', 'WIP limit'), limit);
+    const warning = make('p', 'wip-warning');
+    warning.setAttribute('role', 'status');
     const header = make('div', 'column-header');
-    header.append(heading, count);
+    header.append(heading, count, caption);
+    // A number box drops the text it cannot show (letters, spaces) but still deletes the selected number that text replaced, and the
+    // box then looks cleared. So an insertion with nothing in it that the box can show is stopped before the browser acts on it.
+    // Enter, deletions, Undo and Redo bring no text and are never stopped.
+    limit.addEventListener('beforeinput', (event) => {
+      if (/^insert(Text|From|Replacement)/.test(event.inputType) && !/[0-9+.eE-]/.test(event.data ?? '')) event.preventDefault();
+    });
+    limit.addEventListener('change', () => {
+      const wanted = limitIn(limit);
+      if (isValidWipLimit(wanted)) {
+        const next = setWipLimit(latest(), id, wanted);
+        // A redraw of unchanged lists would remove the card button that Tab or a click is on its way to.
+        commit(next, !sameCards(next, board));
+      }
+      showLimit(id, limit);
+    });
+    // Chromium fires no change event for an empty box holding only "-" or "e": put the stored limit back.
+    limit.addEventListener('blur', () => {
+      if (limit.validity.badInput) showLimit(id, limit);
+    });
     const list = make('ul', 'cards');
     list.setAttribute('aria-label', `${title} cards`);
     const section = make('section', 'column');
     section.dataset.column = id;
     section.setAttribute('aria-labelledby', heading.id);
-    section.append(header);
+    section.append(header, warning);
     if (id === 'todo') section.append(addForm);
     section.append(list);
     // A card can be dropped anywhere on the column's section, not only on its list.
@@ -124,10 +165,10 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
       clearDropTargets();
       moveTo(cardId, { id, title });
     });
-    return { id, heading, count, list, section };
+    return { id, heading, count, limit, warning, list, section };
   });
 
-  function commit(next: Board): void {
+  function commit(next: Board, redrawLists = true): void {
     board = next;
     try {
       saveBoard(storage, board);
@@ -137,7 +178,7 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
       saveFailed = true;
       boardAlert.textContent = SAVE_FAILED;
     }
-    render();
+    render(redrawLists);
   }
 
   // The board to build the next change on: what storage holds now, because another tab may have saved since this one loaded.
@@ -262,11 +303,22 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
     return item;
   }
 
-  function render(): void {
-    items.clear();
+  function showLimit(id: ColumnId, input: HTMLInputElement): void {
+    const { wipLimit } = board.columns[id];
+    input.value = wipLimit === null ? '' : String(wipLimit);
+  }
+
+  function render(lists = true): void {
+    if (lists) items.clear();
     for (const column of columns) {
-      const { cards } = board.columns[column.id];
+      const { cards, wipLimit } = board.columns[column.id];
       column.count.textContent = `${cards.length} ${cards.length === 1 ? 'card' : 'cards'}`;
+      // A live region may be read again whenever it is written, so it is written only when its text changes.
+      const message = isOverLimit(board, column.id) ? `Over WIP limit: ${cards.length} of ${wipLimit}` : '';
+      if (column.warning.textContent !== message) column.warning.textContent = message;
+      // A box that is being typed in is left alone.
+      if (document.activeElement !== column.limit) showLimit(column.id, column.limit);
+      if (!lists) continue;
       column.list.replaceChildren(
         ...cards.map((card) => {
           const item = card.id === editingId ? editItem(card) : cardItem(card, column.heading, column.id);
