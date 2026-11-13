@@ -1,16 +1,84 @@
+:root {
+  color-scheme: light;
+  --page: #eef0f3;
+  --surface: #f8f9fb;
+  --card: #ffffff;
+  --text: #1a1d21;
+  --border: #6b7280;
+  --button: #e2e5ea;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* A dark device gets Dark unless Light was chosen. This list and the one for a chosen Dark below are the same: change both. */
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --page: #101317;
+    --surface: #181c21;
+    --card: #22272e;
+    --text: #e8ebf0;
+    --border: #8b94a3;
+    --button: #323843;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --page: #101317;
+  --surface: #181c21;
+  --card: #22272e;
+  --text: #e8ebf0;
+  --border: #8b94a3;
+  --button: #323843;
+}
+
 body {
   margin: 0;
   padding: 1rem;
   font-family: system-ui, sans-serif;
   line-height: 1.4;
+  background: var(--page);
+  color: var(--text);
+}
+
+/* Every control is at least 44 x 44 CSS px, so a finger can hit it. */
+button,
+input,
+textarea,
+::file-selector-button {
+  box-sizing: border-box;
+  min-height: 44px;
+  font: inherit;
+  color: var(--text);
+  background: var(--card);
+  border: 1px solid var(--border);
+}
+
+button,
+::file-selector-button {
+  background: var(--button);
+}
+
+button {
+  min-width: 44px;
+  padding: 0 0.75rem;
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin-bottom: 1rem;
 }
 
 h1 {
-  margin: 0 0 1rem;
+  margin: 0;
 }
 
 .board-alert {
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .board-alert:not(:empty) {
@@ -34,14 +102,21 @@ h1 {
 
 .board {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
   align-items: start;
 }
 
+@media (min-width: 48rem) {
+  .board {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 .column {
   padding: 0.75rem;
-  border: 1px solid;
+  background: var(--surface);
+  border: 1px solid var(--border);
 }
 
 .column-header {
@@ -122,7 +197,8 @@ h1 {
 
 .card {
   padding: 0.5rem;
-  border: 1px solid;
+  background: var(--card);
+  border: 1px solid var(--border);
 }
 
 .card-title {

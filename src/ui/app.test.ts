@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { addCard, emptyBoard, type Card, type ColumnId } from '../board';
 import { parseBoard, serializeBoard } from '../storage';
@@ -232,6 +234,7 @@ function storedLimits() {
 
 beforeEach(() => {
   localStorage.clear();
+  document.documentElement.removeAttribute('data-theme'); // <html> is shared by every test in this file
   counter = 0;
   root = document.createElement('div');
   document.body.replaceChildren(root);
@@ -1752,6 +1755,171 @@ describe('export and import', () => {
 
   it('leaves the time zone as the host had it', () => {
     expect(new Date(Date.UTC(2026, 0, 1)).getTimezoneOffset()).toBe(HOST_OFFSET);
+  });
+});
+
+describe('theme', () => {
+  const THEME_KEY = 'loopboard:theme';
+  const refused = (): never => {
+    throw new Error('the storage refused');
+  };
+  let errors: unknown[];
+  // jsdom reports an error thrown in a listener or a script on window instead of throwing it at the caller.
+  const onError = (event: ErrorEvent): void => {
+    errors.push(event.error);
+  };
+
+  beforeEach(() => {
+    errors = [];
+    window.addEventListener('error', onError);
+  });
+
+  afterEach(() => {
+    window.removeEventListener('error', onError);
+    vi.restoreAllMocks();
+  });
+
+  function themeButton(): HTMLButtonElement {
+    const found = root.querySelector<HTMLButtonElement>('button.theme-button');
+    if (!found) throw new Error('no theme button');
+    return found;
+  }
+
+  // What the person reads on the button, and what the stylesheet sees on <html>.
+  function shownTheme() {
+    return { button: themeButton().textContent, attribute: document.documentElement.getAttribute('data-theme') };
+  }
+
+  it('puts one Theme button in the header with the heading, named by its own text', () => {
+    start();
+    const header = root.querySelector('header');
+    expect(root.firstElementChild).toBe(header);
+    expect(header?.querySelector('h1')?.textContent).toBe('LoopBoard');
+    expect(header?.querySelectorAll('button')).toHaveLength(1);
+    expect(header?.contains(button('Theme: System'))).toBe(true);
+    expect(themeButton().type).toBe('button');
+    expect(themeButton().hasAttribute('aria-label')).toBe(false);
+  });
+
+  it('starts as System: no data-theme, and nothing is stored yet', () => {
+    start();
+    expect(shownTheme()).toEqual({ button: 'Theme: System', attribute: null });
+    expect(localStorage.getItem(THEME_KEY)).toBeNull();
+  });
+
+  it('cycles System, Light, Dark, System, and sets or removes data-theme on <html> each time', () => {
+    start();
+    const seen = [shownTheme()];
+    for (let step = 0; step < 3; step += 1) {
+      themeButton().click();
+      seen.push(shownTheme());
+    }
+    expect(seen).toEqual([
+      { button: 'Theme: System', attribute: null },
+      { button: 'Theme: Light', attribute: 'light' },
+      { button: 'Theme: Dark', attribute: 'dark' },
+      { button: 'Theme: System', attribute: null },
+    ]);
+  });
+
+  it('stores each choice under loopboard:theme as the word itself, System included', () => {
+    start();
+    const stored: (string | null)[] = [];
+    for (let step = 0; step < 3; step += 1) {
+      themeButton().click();
+      stored.push(localStorage.getItem(THEME_KEY));
+    }
+    expect(stored).toEqual(['light', 'dark', 'system']);
+  });
+
+  it.each([
+    ['light', 'Light'],
+    ['dark', 'Dark'],
+  ] as const)('applies a stored %s at start-up and after a reload', (word, name) => {
+    localStorage.setItem(THEME_KEY, word);
+    start();
+    expect(shownTheme()).toEqual({ button: `Theme: ${name}`, attribute: word });
+    document.documentElement.removeAttribute('data-theme'); // a reload gives a fresh <html>
+    root.replaceChildren();
+    start();
+    expect(shownTheme()).toEqual({ button: `Theme: ${name}`, attribute: word });
+  });
+
+  it('starts with no data-theme on <html> whatever the test before it chose (this one follows a Dark)', () => {
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+  });
+
+  it.each(['system', '', 'Dark', ' dark', 'purple', 'null'])('reads the stored %j as System, leaves it as it was, and the next click goes to Light', (value) => {
+    localStorage.setItem(THEME_KEY, value);
+    document.documentElement.setAttribute('data-theme', 'dark'); // what the script in index.html may have set before the value was checked
+    start();
+    expect(shownTheme()).toEqual({ button: 'Theme: System', attribute: null });
+    expect(localStorage.getItem(THEME_KEY)).toBe(value);
+    themeButton().click();
+    expect(shownTheme()).toEqual({ button: 'Theme: Light', attribute: 'light' });
+    expect(localStorage.getItem(THEME_KEY)).toBe('light');
+  });
+
+  it('starts as System when the storage cannot be read, does not throw, and still stores a choice', () => {
+    start(storageWith({ getItem: refused }));
+    expect(errors).toEqual([]);
+    expect(shownTheme()).toEqual({ button: 'Theme: System', attribute: null });
+    themeButton().click();
+    expect(shownTheme()).toEqual({ button: 'Theme: Light', attribute: 'light' });
+    expect(localStorage.getItem(THEME_KEY)).toBe('light');
+  });
+
+  it('keeps the choice for this visit when the storage refuses to write it, without using the board alert', () => {
+    start(storageWith({ setItem: refused }));
+    themeButton().click();
+    themeButton().click();
+    expect(errors).toEqual([]);
+    expect(shownTheme()).toEqual({ button: 'Theme: Dark', attribute: 'dark' });
+    expect(localStorage.getItem(THEME_KEY)).toBeNull();
+    expect(alerts()[0].textContent).toBe('');
+  });
+
+  it('is not part of the board: choosing a theme saves nothing under the board key', () => {
+    start();
+    for (let step = 0; step < 3; step += 1) themeButton().click();
+    expect(localStorage.getItem(KEY)).toBeNull();
+    seed();
+    const before = localStorage.getItem(KEY);
+    themeButton().click();
+    expect(localStorage.getItem(KEY)).toBe(before);
+  });
+
+  describe('the script in index.html, which runs before the first paint', () => {
+    const html = readFileSync(join(import.meta.dirname, '../../index.html'), 'utf8');
+    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]);
+
+    // jsdom runs the text of a script element when it is added to the page, as a browser runs the one in <head>.
+    function runIt(): void {
+      const element = document.createElement('script');
+      element.textContent = scripts[0];
+      document.head.append(element);
+      element.remove();
+    }
+
+    it('is the only inline script, and the viewport meta is as issue 1 made it', () => {
+      expect(scripts).toHaveLength(1);
+      expect(html).toContain('<meta name="viewport" content="width=device-width, initial-scale=1" />');
+    });
+
+    it.each(['light', 'dark'])('puts a stored %s on <html> so that the first paint is already that theme', (word) => {
+      localStorage.setItem(THEME_KEY, word);
+      runIt();
+      expect(document.documentElement.getAttribute('data-theme')).toBe(word);
+    });
+
+    it('sets nothing when nothing is stored, and does not throw when the storage refuses', () => {
+      runIt();
+      expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+      vi.spyOn(Storage.prototype, 'getItem').mockImplementation(refused);
+      runIt();
+      expect(errors).toEqual([]);
+      expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+    });
   });
 });
 

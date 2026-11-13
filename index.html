@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>LoopBoard</title>
+    <script>
+      // Sets the stored theme before the first paint, so that a stored Light or Dark does not flash the other one while the app loads.
+      // Only light and dark change the look; src/ui/app.ts checks the value again and removes this attribute for anything else.
+      try {
+        const theme = localStorage.getItem('loopboard:theme');
+        if (theme) document.documentElement.dataset.theme = theme;
+      } catch {}
+    </script>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>

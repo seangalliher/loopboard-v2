@@ -9,6 +9,10 @@ export type AppDeps = {
 const LOAD_FAILED = 'The saved board could not be read, so the board starts empty.';
 const SAVE_FAILED = 'The board could not be saved. Your changes may be lost when you reload.';
 const CARD_TYPE = 'application/x-loopboard-card'; // what a dragged card puts in dataTransfer: its id
+const THEME_KEY = 'loopboard:theme';
+const THEMES = ['system', 'light', 'dark'] as const; // the order the Theme button goes through them; the word itself is what is stored
+type Theme = (typeof THEMES)[number];
+const THEME_NAMES: Record<Theme, string> = { system: 'System', light: 'Light', dark: 'Dark' };
 const IMPORT_CONFIRM = 'Replace the whole board with the one in this file? The board you have now will be lost.';
 const IMPORT_FAILED = 'Could not import the file: ';
 const IMPORT_UNREADABLE = 'it could not be read.';
@@ -51,6 +55,16 @@ function today(): string {
   const now = new Date();
   const two = (value: number): string => String(value).padStart(2, '0');
   return `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
+}
+
+// The theme that was chosen last time. A missing, unknown or unreadable value is System, which follows the device.
+function storedTheme(storage: AppDeps['storage']): Theme {
+  try {
+    const value = storage.getItem(THEME_KEY);
+    return THEMES.find((theme) => theme === value) ?? 'system';
+  } catch {
+    return 'system';
+  }
 }
 
 // The three inputs shared by the add form and the edit form.
@@ -105,6 +119,25 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
 
   const status = make('p', 'move-status');
   status.setAttribute('role', 'status');
+
+  let theme = storedTheme(storage);
+  const themeButton = button('', 'button', 'theme-button');
+  const showTheme = (): void => {
+    // System has no attribute at all: the stylesheet then follows prefers-color-scheme.
+    if (theme === 'system') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.dataset.theme = theme;
+    themeButton.textContent = `Theme: ${THEME_NAMES[theme]}`;
+  };
+  themeButton.addEventListener('click', () => {
+    theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
+    showTheme();
+    try {
+      storage.setItem(THEME_KEY, theme);
+    } catch {
+      // a storage that refuses the write keeps the choice for this visit only
+    }
+  });
+  showTheme();
 
   const exportButton = button('Export board', 'button', 'export-button');
   exportButton.addEventListener('click', exportBoard);
@@ -406,5 +439,7 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
   const main = make('main', 'board');
   main.append(...columns.map((column) => column.section));
   render();
-  root.replaceChildren(make('h1', '', 'LoopBoard'), boardAlert, status, tools, main);
+  const header = make('header', 'app-header');
+  header.append(make('h1', '', 'LoopBoard'), themeButton);
+  root.replaceChildren(header, boardAlert, status, tools, main);
 }
