@@ -20,6 +20,18 @@ h1 {
   font-weight: bold;
 }
 
+.board-tools,
+.import-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+
+.board-tools {
+  margin-bottom: 1rem;
+}
+
 .board {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

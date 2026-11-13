@@ -1,5 +1,5 @@
 import { COLUMNS, addCard, deleteCard, editCard, emptyBoard, isOverLimit, isValidWipLimit, moveCard, setWipLimit, type Board, type Card, type ColumnId } from '../board';
-import { loadBoard, saveBoard } from '../storage';
+import { loadBoard, parseBoard, saveBoard, serializeBoard } from '../storage';
 
 export type AppDeps = {
   storage: Pick<Storage, 'getItem' | 'setItem'>;
@@ -9,6 +9,11 @@ export type AppDeps = {
 const LOAD_FAILED = 'The saved board could not be read, so the board starts empty.';
 const SAVE_FAILED = 'The board could not be saved. Your changes may be lost when you reload.';
 const CARD_TYPE = 'application/x-loopboard-card'; // what a dragged card puts in dataTransfer: its id
+const IMPORT_CONFIRM = 'Replace the whole board with the one in this file? The board you have now will be lost.';
+const IMPORT_FAILED = 'Could not import the file: ';
+const IMPORT_UNREADABLE = 'it could not be read.';
+const IMPORT_REASON_MAX = 200; // parseBoard repeats names and ids from the file, which can be any length
+const REVOKE_AFTER_MS = 40_000; // the exported file's object URL stays valid this long, so a browser that starts the download late still finds it
 
 function make<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text = ''): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
@@ -39,6 +44,13 @@ function limitIn(input: HTMLInputElement): number | null {
 // Whether two boards hold the same cards in every column, whatever their limits.
 function sameCards(a: Board, b: Board): boolean {
   return COLUMNS.every(({ id }) => JSON.stringify(a.columns[id].cards) === JSON.stringify(b.columns[id].cards));
+}
+
+// Today on the person's own calendar, not in UTC, which is already tomorrow or still yesterday for part of each day in most time zones.
+function today(): string {
+  const now = new Date();
+  const two = (value: number): string => String(value).padStart(2, '0');
+  return `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
 }
 
 // The three inputs shared by the add form and the edit form.
@@ -93,6 +105,41 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
 
   const status = make('p', 'move-status');
   status.setAttribute('role', 'status');
+
+  const exportButton = button('Export board', 'button', 'export-button');
+  exportButton.addEventListener('click', exportBoard);
+  const importInput = make('input', 'import-input');
+  importInput.type = 'file';
+  importInput.accept = 'application/json,.json';
+  importInput.addEventListener('change', async () => {
+    const file = importInput.files?.[0];
+    importInput.value = ''; // so that choosing the same file again fires change again
+    if (!file) return;
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      boardAlert.textContent = IMPORT_FAILED + IMPORT_UNREADABLE;
+      return;
+    }
+    let imported: Board;
+    try {
+      imported = parseBoard(text);
+    } catch (caught) {
+      if (!(caught instanceof Error)) throw caught;
+      const { message } = caught;
+      boardAlert.textContent = IMPORT_FAILED + (message.length > IMPORT_REASON_MAX ? `${message.slice(0, IMPORT_REASON_MAX)}\u2026` : message);
+      return;
+    }
+    if (!window.confirm(IMPORT_CONFIRM)) return;
+    // The file is the whole new board, whatever another tab has saved since: nothing is built on latest().
+    editingId = null; // the open edit form belongs to the board that is being replaced
+    commit(imported);
+  });
+  const importLabel = make('label', 'import-label');
+  importLabel.append(make('span', '', 'Import board from JSON'), importInput);
+  const tools = make('div', 'board-tools');
+  tools.append(exportButton, importLabel);
 
   const addFields = cardFields();
   const addError = errorLine();
@@ -190,6 +237,17 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
     } catch {
       return board;
     }
+  }
+
+  function exportBoard(): void {
+    const url = URL.createObjectURL(new Blob([serializeBoard(board)], { type: 'application/json' }));
+    const link = make('a');
+    link.href = url;
+    link.download = `loopboard-${today()}.json`;
+    root.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), REVOKE_AFTER_MS);
   }
 
   function focusCard(id: string, selector: string): void {
@@ -348,5 +406,5 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
   const main = make('main', 'board');
   main.append(...columns.map((column) => column.section));
   render();
-  root.replaceChildren(make('h1', '', 'LoopBoard'), boardAlert, status, main);
+  root.replaceChildren(make('h1', '', 'LoopBoard'), boardAlert, status, tools, main);
 }
