@@ -183,6 +183,53 @@ function marked(): boolean[] {
   return COLUMN_IDS.map((id) => column(id).classList.contains('drop-target'));
 }
 
+function wip(id: ColumnId): HTMLInputElement {
+  const found = column(id).querySelector<HTMLInputElement>('input.wip-input');
+  if (!found) throw new Error(`no WIP limit box in ${id}`);
+  return found;
+}
+
+// What a browser does when a limit is typed and the box is left, or Enter is pressed: the text is in the box, then `change` fires.
+function typeLimit(id: ColumnId, text: string): void {
+  wip(id).value = text;
+  wip(id).dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+// What Chromium does when a person edits the box (measured): `beforeinput` first, which an app can cancel. If nothing cancels it, the
+// browser changes the box to `result` and then fires `input`. A number box drops the text it cannot show but still deletes the
+// selected number that text replaced, so `result` is '' for letters typed over it. Returns false when the edit was cancelled.
+function editLimit(id: ColumnId, inputType: string, data: string | null, result: string): boolean {
+  const box = wip(id);
+  if (!box.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType, data }))) return false;
+  box.value = result;
+  box.dispatchEvent(new InputEvent('input', { bubbles: true, inputType, data }));
+  return true;
+}
+
+// The box is left, or Enter is pressed: `change` fires with whatever the box holds.
+function leaveLimit(id: ColumnId): void {
+  wip(id).dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function warning(id: ColumnId): HTMLElement {
+  const found = column(id).querySelector<HTMLElement>('.wip-warning');
+  if (!found) throw new Error(`no warning in ${id}`);
+  return found;
+}
+
+function warnings(): string[] {
+  return COLUMN_IDS.map((id) => warning(id).textContent ?? '');
+}
+
+function boxes(): string[] {
+  return COLUMN_IDS.map((id) => wip(id).value);
+}
+
+function storedLimits() {
+  const { columns } = parseBoard(localStorage.getItem(KEY) ?? '');
+  return { todo: columns.todo.wipLimit, doing: columns.doing.wipLimit, done: columns.done.wipLimit };
+}
+
 beforeEach(() => {
   localStorage.clear();
   counter = 0;
@@ -193,6 +240,112 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
 });
+
+const realSetTimeout = globalThis.setTimeout; // vi.useFakeTimers() replaces the global one, and the import tests wait on a real one
+const HOST_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone; // read before any test changes TZ
+const HOST_OFFSET = new Date(Date.UTC(2026, 0, 1)).getTimezoneOffset();
+const IMPORT_FAILED = 'Could not import the file: ';
+const IMPORT_CONFIRM = 'Replace the whole board with the one in this file? The board you have now will be lost.';
+const NOT_JSON = 'The file is not valid JSON.';
+const UNREADABLE = 'it could not be read.';
+
+// The text of a board file; the key order is the one serializeBoard writes.
+function boardText(cards: Partial<Record<ColumnId, Card[]>>, limits: Partial<Record<ColumnId, number>> = {}): string {
+  return JSON.stringify({ version: 1, columns: Object.fromEntries(COLUMN_IDS.map((id) => [id, { wipLimit: limits[id] ?? null, cards: cards[id] ?? [] }])) });
+}
+
+const IMPORTED = boardText(
+  {
+    todo: [
+      { id: 'n1', title: 'Imported one', note: 'from a file', due: '2027-01-02' },
+      { id: 'n2', title: 'Imported two', note: '', due: null },
+    ],
+    done: [{ id: 'n3', title: 'Imported three', note: '', due: null }],
+  },
+  { todo: 1, done: 3 },
+);
+
+function fileOf(content: string | Uint8Array<ArrayBuffer>, name = 'board.json'): File {
+  return new File([content], name, { type: 'application/json' });
+}
+
+function unreadableFile(): File {
+  const file = fileOf('{}');
+  vi.spyOn(file, 'text').mockRejectedValue(new DOMException('gone', 'NotReadableError'));
+  return file;
+}
+
+function reasonOf(text: string): string {
+  try {
+    parseBoard(text);
+  } catch (caught) {
+    return caught instanceof Error ? caught.message : String(caught);
+  }
+  throw new Error('parseBoard accepted the text');
+}
+
+function importBox(): HTMLInputElement {
+  const box = field(root, 'Import board from JSON');
+  if (!(box instanceof HTMLInputElement)) throw new Error('the import control is not an input');
+  return box;
+}
+
+// jsdom cannot hold a chosen file, so the box is given what Chromium's file input does (measured): `files` holds the choice, `value`
+// reports it and, set to '', empties it, and choosing the file the box already holds fires no `change`. Returns when the app is done:
+// reading a file settles within microtasks in jsdom 29 and everything after it is synchronous, so one real timer turn is enough.
+const held = new WeakMap<HTMLInputElement, File[]>();
+
+async function chooseFile(file: File): Promise<void> {
+  const box = importBox();
+  if (!held.has(box)) {
+    held.set(box, []);
+    Object.defineProperties(box, {
+      files: { configurable: true, get: () => held.get(box) },
+      value: {
+        configurable: true,
+        get: () => (held.get(box)?.length ? `C:\\fakepath\\${held.get(box)?.[0].name}` : ''),
+        set: (text: string) => {
+          if (text === '') held.set(box, []);
+        },
+      },
+    });
+  }
+  if (held.get(box)?.[0] === file) return;
+  held.set(box, [file]);
+  box.dispatchEvent(new Event('change', { bubbles: true }));
+  await new Promise((resolve) => realSetTimeout(resolve, 0));
+}
+
+function confirmWith(answer: boolean) {
+  return vi.spyOn(window, 'confirm').mockReturnValue(answer);
+}
+
+// The browser parts of a download, replaced: the Blob given to URL.createObjectURL, the link that was clicked as it was at that moment,
+// and the revocations.
+function stubDownload() {
+  const clicked: { href: string; download: string; inPage: boolean }[] = [];
+  const create = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:loopboard-test');
+  const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+    clicked.push({ href: this.href, download: this.download, inPage: this.isConnected });
+  });
+  return { clicked, create, revoke };
+}
+
+function exportedBlob(create: ReturnType<typeof stubDownload>['create']): Blob {
+  const [blob] = create.mock.calls[0];
+  if (!(blob instanceof Blob)) throw new Error('createObjectURL was not given a Blob');
+  return blob;
+}
+
+// The seeded board stored as indented JSON: any save at all would change these bytes, so "untouched" can be checked byte for byte.
+function seedIndented(): string {
+  seed();
+  const text = JSON.stringify(JSON.parse(localStorage.getItem(KEY) ?? ''), null, 2);
+  localStorage.setItem(KEY, text);
+  start();
+  return text;
+}
 
 describe('start-up and layout', () => {
   it('renders an h1 and three sections in order, each named by its h2 and holding a card list and a count', () => {
@@ -488,6 +641,7 @@ describe('two tabs on one storage', () => {
     ['deletes a card the other tab deleted', () => button('Delete "Write report"').click(), { todo: ['Buy milk', 'From A'], doing: ['Fix bike (A)'], done: ['Pay rent'] }],
     ['moves a card to another column', () => button('Move "Buy milk" to Done').click(), { todo: ['From A'], doing: ['Fix bike (A)'], done: ['Pay rent', 'Buy milk'] }],
     ['moves a card the other tab renamed', () => button('Move "Fix bike" to Done').click(), { todo: ['Buy milk', 'From A'], doing: [], done: ['Pay rent', 'Fix bike (A)'] }],
+    ['sets a WIP limit', () => typeLimit('doing', '2'), { todo: ['Buy milk', 'From A'], doing: ['Fix bike (A)'], done: ['Pay rent'] }],
   ] as const)('a stale tab that %s keeps what the other tab saved', (_what, act, expected) => {
     staleTab();
     act();
@@ -907,6 +1061,697 @@ describe('moving cards', () => {
       expect([...addForm().querySelectorAll('input, textarea, button')].map((control) => control.getAttribute('aria-label'))).toEqual([null, null, null, null]);
       expect([...addForm().querySelectorAll('label, button')].map((item) => item.textContent)).toEqual(['Title', 'Note', 'Due date', 'Add card']);
     });
+  });
+});
+
+describe('WIP limits', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  describe('the box', () => {
+    it.each([
+      ['todo', 'To do'],
+      ['doing', 'Doing'],
+      ['done', 'Done'],
+    ] as const)('the %s header holds the count and a labelled number input', (id, title) => {
+      start();
+      const input = wip(id);
+      expect(within(id, '.column-header').contains(input)).toBe(true);
+      expect(within(id, '.column-header').contains(within(id, '.count'))).toBe(true);
+      expect(input.type).toBe('number');
+      expect(input.getAttribute('min')).toBe('1');
+      expect(input.getAttribute('step')).toBe('1');
+      expect(input.value).toBe('');
+      expect(input.id).toBe(`${id}-wip`);
+      expect(input.getAttribute('aria-label')).toBe(`WIP limit for ${title}`);
+      const label = input.closest('label');
+      expect(label?.control).toBe(input);
+      expect(label?.textContent).toBe('WIP limit');
+      expect(input.getAttribute('aria-label')).toContain(label?.textContent ?? '');
+      expect(input.hasAttribute('tabindex')).toBe(false);
+    });
+
+    it('a valid limit is saved for that column only, and after a reload the box shows it', () => {
+      seed();
+      typeLimit('doing', '3');
+      expect(storedLimits()).toEqual({ todo: null, doing: 3, done: null });
+      expect(titlesByColumn(storedCards)).toEqual({ todo: ['Buy milk', 'Write report'], doing: ['Fix bike'], done: ['Pay rent'] });
+      expect(boxes()).toEqual(['', '3', '']);
+      root.replaceChildren();
+      start();
+      expect(boxes()).toEqual(['', '3', '']);
+    });
+
+    it.each([
+      ['3', 3],
+      ['1', 1],
+      ['007', 7],
+      ['1e2', 100],
+    ])('the text %j is saved as the limit %d, and the focused box then shows the number', (text, limit) => {
+      start();
+      wip('todo').focus(); // as when Enter is pressed: the box keeps focus, so a redraw leaves it alone
+      typeLimit('todo', text);
+      expect(storedLimits().todo).toBe(limit);
+      expect(wip('todo').value).toBe(String(limit));
+    });
+
+    it('an empty box means no limit: it clears a stored limit and saves null', () => {
+      start();
+      typeLimit('doing', '2');
+      expect(storedLimits().doing).toBe(2);
+      typeLimit('doing', '');
+      expect(storedLimits().doing).toBeNull();
+      expect(boxes()).toEqual(['', '', '']);
+    });
+
+    it('typing alone saves nothing: only the change event commits a limit', () => {
+      start();
+      for (const text of ['1', '12']) {
+        wip('doing').value = text;
+        wip('doing').dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      expect(localStorage.getItem(KEY)).toBeNull();
+      wip('doing').dispatchEvent(new Event('change', { bubbles: true }));
+      expect(storedLimits().doing).toBe(12);
+    });
+
+    describe('a value that is not a positive integer', () => {
+      // Doing holds the limit 3, saved once; returns the list of everything that was saved.
+      function startWithLimit(): string[] {
+        seed();
+        const saved: string[] = [];
+        start(storageWith({ setItem: (key, value) => { saved.push(value); localStorage.setItem(key, value); } }));
+        typeLimit('doing', '3');
+        expect(saved).toHaveLength(1);
+        return saved;
+      }
+
+      it.each(['0', '-1', '1.5', '.5', '1e-1'])('%j is not saved or announced, and the box returns to the stored limit', (text) => {
+        const saved = startWithLimit();
+        const before = localStorage.getItem(KEY);
+        const pressed = button('Edit "Fix bike"');
+        pressed.focus();
+        typeLimit('doing', text);
+        expect(saved).toHaveLength(1);
+        expect(localStorage.getItem(KEY)).toBe(before);
+        expect(wip('doing').value).toBe('3');
+        expect(alerts()[0].textContent).toBe('');
+        vi.advanceTimersByTime(1000);
+        expect(status().textContent).toBe('');
+        expect(warnings()).toEqual(['', '', '']);
+        expect(document.activeElement).toBe(pressed);
+      });
+
+      it('a box holding text that is not a number (value "" with badInput) is not "no limit"', () => {
+        const saved = startWithLimit();
+        Object.defineProperty(wip('doing'), 'validity', { value: { badInput: true } }); // jsdom never reports badInput; a browser does for "-" or "e"
+        typeLimit('doing', '');
+        expect(saved).toHaveLength(1);
+        expect(storedLimits().doing).toBe(3);
+        expect(wip('doing').value).toBe('3');
+      });
+
+      it('a box holding text that is not a number goes back to the stored limit when it loses focus, with no change event', () => {
+        startWithLimit();
+        Object.defineProperty(wip('doing'), 'validity', { value: { badInput: true } });
+        wip('doing').value = '';
+        wip('doing').dispatchEvent(new Event('blur'));
+        expect(wip('doing').value).toBe('3');
+      });
+
+      it('a valid number that was typed and not yet committed is left alone when the box loses focus', () => {
+        startWithLimit();
+        wip('doing').value = '5';
+        wip('doing').dispatchEvent(new Event('blur'));
+        expect(wip('doing').value).toBe('5');
+        expect(storedLimits().doing).toBe(3);
+      });
+
+      describe('text the box cannot show, and a deliberate clear', () => {
+        // Measured in Chromium 158: a number box drops the text it cannot show (letters, spaces) but still deletes the selected number
+        // that text replaced, so the box looked cleared. `beforeinput` comes first and can be cancelled, which leaves the box as it was.
+        it.each([
+          ['a letter typed', 'insertText', 'a'],
+          ['a space typed', 'insertText', ' '],
+          ['a word pasted', 'insertFromPaste', 'abc'],
+          ['a word dropped', 'insertFromDrop', 'abc'],
+          ['a word as a replacement', 'insertReplacementText', 'abc'],
+          ['a paste with no text in it', 'insertFromPaste', null],
+        ] as const)('%s over the selected number is stopped: the limit is kept, nothing is saved or announced, and the box still shows it', (_what, inputType, data) => {
+          const saved = startWithLimit();
+          const before = localStorage.getItem(KEY);
+          const pressed = button('Edit "Fix bike"');
+          pressed.focus();
+          expect(editLimit('doing', inputType, data, '')).toBe(false);
+          expect(wip('doing').value).toBe('3');
+          expect(saved).toHaveLength(1);
+          expect(localStorage.getItem(KEY)).toBe(before);
+          expect(alerts()[0].textContent).toBe('');
+          vi.advanceTimersByTime(1000);
+          expect(status().textContent).toBe('');
+          expect(warnings()).toEqual(['', '', '']);
+          expect(document.activeElement).toBe(pressed);
+        });
+
+        it.each([
+          ['a digit, or the new number of ArrowUp, ArrowDown and the spinner', 'insertText', '5'],
+          ['an e', 'insertText', 'e'],
+          ['a minus sign', 'insertText', '-'],
+          ['a plus sign', 'insertText', '+'],
+          ['a point', 'insertText', '.'],
+          ['a number pasted', 'insertFromPaste', '12'],
+          ['a number with letters pasted (the browser keeps the 12)', 'insertFromPaste', '12abc'],
+          ['a number with spaces pasted (the browser keeps the 7)', 'insertFromPaste', ' 7 '],
+          ['a number dropped', 'insertFromDrop', '7'],
+          ['Enter', 'insertLineBreak', null],
+        ] as const)('%s is not stopped', (_what, inputType, data) => {
+          startWithLimit();
+          expect(editLimit('doing', inputType, data, '5')).toBe(true);
+          expect(wip('doing').value).toBe('5');
+        });
+
+        it.each([
+          ['Backspace on the selected number', 'deleteContentBackward'],
+          ['Delete on the selected number', 'deleteContentForward'],
+          ['cut of the selected number', 'deleteByCut'],
+          ['Control+Backspace on the selected number', 'deleteWordBackward'],
+          ['dragging the selected number out of the box', 'deleteByDrag'],
+        ])('%s is not stopped, and is a deliberate clear: the limit is removed', (_what, inputType) => {
+          const saved = startWithLimit();
+          expect(editLimit('doing', inputType, null, '')).toBe(true);
+          leaveLimit('doing');
+          expect(saved).toHaveLength(2);
+          expect(storedLimits().doing).toBeNull();
+          expect(wip('doing').value).toBe('');
+        });
+
+        it('Backspace, Undo and Redo on the selected number: Undo puts the number back and Redo clears it again', () => {
+          const saved = startWithLimit();
+          expect(editLimit('doing', 'deleteContentBackward', null, '')).toBe(true);
+          expect(editLimit('doing', 'historyUndo', null, '3')).toBe(true);
+          expect(wip('doing').value).toBe('3');
+          expect(editLimit('doing', 'historyRedo', null, '')).toBe(true);
+          leaveLimit('doing');
+          expect(saved).toHaveLength(2);
+          expect(storedLimits().doing).toBeNull();
+        });
+
+        it('letters typed over the selected number, then Backspace on it: the number is still selected, so this is a clear', () => {
+          const saved = startWithLimit();
+          expect(editLimit('doing', 'insertText', 'a', '')).toBe(false);
+          expect(editLimit('doing', 'deleteContentBackward', null, '')).toBe(true);
+          leaveLimit('doing');
+          expect(saved).toHaveLength(2);
+          expect(storedLimits().doing).toBeNull();
+        });
+
+        it('letters typed over the selected number leave nothing for Undo and Redo to replay: the limit is kept', () => {
+          startWithLimit();
+          const replayable: string[] = []; // what the browser's Undo would replay: the number that each edit not cancelled replaced
+          const shown = wip('doing').value;
+          if (editLimit('doing', 'insertText', 'a', '')) replayable.push(shown);
+          for (const replaced of replayable) {
+            editLimit('doing', 'historyUndo', null, replaced);
+            editLimit('doing', 'historyRedo', null, '');
+          }
+          leaveLimit('doing');
+          expect(storedLimits().doing).toBe(3);
+          expect(wip('doing').value).toBe('3');
+        });
+
+        it('a letter typed over part of the number leaves the whole number as it was', () => {
+          startWithLimit();
+          typeLimit('doing', '123');
+          expect(editLimit('doing', 'insertText', 'a', '13')).toBe(false); // Chromium deletes the selected 2 and drops the a
+          expect(wip('doing').value).toBe('123');
+          leaveLimit('doing');
+          expect(storedLimits().doing).toBe(123);
+        });
+      });
+    });
+
+    it('when saving a limit fails, the limit and its warning stay on screen and the one alert says so', () => {
+      seed();
+      start(storageWith({ setItem: () => { throw new DOMException('full', 'QuotaExceededError'); } }));
+      typeLimit('todo', '1');
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0].textContent).toBe(SAVE_FAILED);
+      expect(wip('todo').value).toBe('1');
+      expect(warning('todo').textContent).toBe('Over WIP limit: 2 of 1');
+    });
+  });
+
+  describe('the warning', () => {
+    it('reads "Over WIP limit: <n> of <limit>" above the limit, and is empty at the limit, under it, and with no limit', () => {
+      seed();
+      expect(warnings()).toEqual(['', '', '']);
+      typeLimit('todo', '3');
+      expect(warnings()).toEqual(['', '', '']);
+      typeLimit('todo', '2');
+      expect(warnings()).toEqual(['', '', '']);
+      typeLimit('todo', '1');
+      expect(warnings()).toEqual(['Over WIP limit: 2 of 1', '', '']);
+      expect(status().textContent).toBe('');
+      typeLimit('todo', '');
+      expect(warnings()).toEqual(['', '', '']);
+    });
+
+    it('is a role="status" element in its own column, right after the header, apart from the page-level move status', () => {
+      seed();
+      typeLimit('todo', '1');
+      const element = warning('todo');
+      expect(element.getAttribute('role')).toBe('status');
+      expect(element.previousElementSibling).toBe(within('todo', '.column-header'));
+      expect(column('todo').querySelectorAll('[role="status"]')).toHaveLength(1);
+      expect(within('todo', '[role="status"]')).toBe(element);
+      expect(element).not.toBe(status());
+      expect(status().getAttribute('role')).toBe('status');
+    });
+
+    it('exists in every column from the start, empty, so that a change is announced', () => {
+      start();
+      expect(COLUMN_IDS.map((id) => column(id).querySelectorAll('[role="status"]').length)).toEqual([1, 1, 1]);
+      expect(warnings()).toEqual(['', '', '']);
+      expect(root.querySelectorAll('[role="status"]')).toHaveLength(4); // three warnings and the move status
+      expect(alerts()).toHaveLength(1);
+    });
+
+    it('is still shown after a reload, with no change made', () => {
+      seed();
+      typeLimit('todo', '1');
+      root.replaceChildren();
+      start();
+      expect(warnings()).toEqual(['Over WIP limit: 2 of 1', '', '']);
+      expect(boxes()).toEqual(['1', '', '']);
+    });
+
+    it('is not written again while its text is the same: a screen reader would read it again', () => {
+      seed();
+      typeLimit('todo', '1');
+      const observer = new MutationObserver(() => {});
+      observer.observe(warning('todo'), { childList: true, characterData: true, subtree: true });
+      typeLimit('doing', '5');
+      button('Move "Fix bike" to Done').click();
+      expect(observer.takeRecords()).toHaveLength(0);
+      add('Another');
+      expect(observer.takeRecords().length).toBeGreaterThan(0);
+      observer.disconnect();
+    });
+  });
+
+  describe('it follows the board at once', () => {
+    beforeEach(() => {
+      seed(); // To do 2 cards, Doing 1, Done 1
+    });
+
+    it.each([
+      ['an add', () => add('Another'), 'Over WIP limit: 3 of 2'],
+      ['a move by button', () => button('Move "Fix bike" to To do').click(), 'Over WIP limit: 3 of 2'],
+      ['a move by drop', () => drag('Pay rent', column('todo')), 'Over WIP limit: 3 of 2'],
+      ['a lower limit', () => typeLimit('todo', '1'), 'Over WIP limit: 2 of 1'],
+    ])('%s raises the warning of the column that is now over its limit', (_what, act, text) => {
+      typeLimit('todo', '2');
+      expect(warnings()).toEqual(['', '', '']);
+      act();
+      expect(warnings()).toEqual([text, '', '']);
+    });
+
+    it.each([
+      ['a delete', () => button('Delete "Buy milk"').click()],
+      ['a move out by button', () => button('Move "Buy milk" to Doing').click()],
+      ['a move out by drop', () => drag('Buy milk', column('done'))],
+      ['a higher limit', () => typeLimit('todo', '2')],
+      ['clearing the limit', () => typeLimit('todo', '')],
+    ])('%s clears it', (_what, act) => {
+      typeLimit('todo', '1');
+      expect(warnings()).toEqual(['Over WIP limit: 2 of 1', '', '']);
+      act();
+      expect(warnings()).toEqual(['', '', '']);
+    });
+
+    it('one move clears the column it leaves and raises the column it enters', () => {
+      typeLimit('todo', '1');
+      typeLimit('doing', '1');
+      expect(warnings()).toEqual(['Over WIP limit: 2 of 1', '', '']);
+      button('Move "Buy milk" to Doing').click();
+      expect(warnings()).toEqual(['', 'Over WIP limit: 2 of 1', '']);
+    });
+  });
+
+  describe('it never blocks', () => {
+    beforeEach(() => {
+      seed();
+      typeLimit('todo', '1'); // To do holds 2 cards: over its limit
+      expect(warning('todo').textContent).toBe('Over WIP limit: 2 of 1');
+    });
+
+    it('adding a card to an over-limit column still works', () => {
+      add('Third');
+      expect(cardsIn('todo').map((card) => card.title)).toEqual(['Buy milk', 'Write report', 'Third']);
+      expect(storedCards('todo')).toHaveLength(3);
+      expect(warning('todo').textContent).toBe('Over WIP limit: 3 of 1');
+    });
+
+    it('moving a card into an over-limit column still works, by button and by drop, with its focus and announcement', () => {
+      button('Move "Fix bike" to To do').click();
+      vi.advanceTimersByTime(100);
+      expect(document.activeElement).toBe(cardItem('Fix bike'));
+      expect(status().textContent).toBe('Moved "Fix bike" to To do');
+      drag('Pay rent', column('todo'));
+      expect(titlesByColumn(storedCards)).toEqual({ todo: ['Buy milk', 'Write report', 'Fix bike', 'Pay rent'], doing: [], done: [] });
+      expect(warning('todo').textContent).toBe('Over WIP limit: 4 of 1');
+    });
+
+    it('disables nothing', () => {
+      expect(root.querySelectorAll(':disabled')).toHaveLength(0);
+    });
+  });
+
+  describe('redrawing', () => {
+    it('never overwrites a limit that is being typed into the focused box, and never moves focus', () => {
+      seed();
+      const box = wip('doing');
+      box.focus();
+      box.value = '12'; // typed, not committed
+      typeLimit('todo', '2'); // another commit redraws every column
+      expect(box.value).toBe('12');
+      expect(document.activeElement).toBe(box);
+      expect(storedLimits()).toEqual({ todo: 2, doing: null, done: null });
+    });
+
+    it('a limit change leaves the card lists alone: the same elements, and focus on a card button stays', () => {
+      seed();
+      const before = [...root.querySelectorAll('li.card')];
+      expect(before).toHaveLength(4);
+      const pressed = button('Edit "Fix bike"');
+      pressed.focus();
+      typeLimit('todo', '1');
+      const after = [...root.querySelectorAll('li.card')];
+      expect(after).toHaveLength(4);
+      after.forEach((item, index) => expect(item).toBe(before[index]));
+      expect(document.activeElement).toBe(pressed);
+    });
+  });
+
+  describe('in two tabs', () => {
+    it('a limit set in another tab survives an add here, and this tab shows it after the add', () => {
+      seed();
+      const tabB = openSecondTab();
+      typeLimit('doing', '2'); // tab A
+      expect(storedLimits().doing).toBe(2);
+      root = tabB;
+      expect(wip('doing').value).toBe('');
+      add('From B');
+      expect(storedLimits()).toEqual({ todo: null, doing: 2, done: null });
+      expect(wip('doing').value).toBe('2');
+    });
+
+    it('a limit set in a stale tab redraws it from storage: the cards another tab saved are listed and counted', () => {
+      seed();
+      const tabB = openSecondTab();
+      add('From A 1');
+      add('From A 2');
+      root = tabB;
+      expect(cardsIn('todo')).toHaveLength(2);
+      typeLimit('todo', '3');
+      expect(cardsIn('todo').map((card) => card.title)).toEqual(['Buy milk', 'Write report', 'From A 1', 'From A 2']);
+      expect(column('todo').querySelector('.count')?.textContent).toBe('4 cards');
+      expect(warning('todo').textContent).toBe('Over WIP limit: 4 of 3');
+      expect(storedLimits().todo).toBe(3);
+      expect(storedCards('todo')).toHaveLength(4);
+    });
+  });
+});
+
+describe('export and import', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    process.env.TZ = HOST_ZONE;
+  });
+
+  it('has an Export board button and a file input named Import board from JSON that takes JSON files, both ahead of the board', () => {
+    start();
+    const input = importBox(); // found through its label: the label's text is the input's accessible name
+    expect(input.type).toBe('file');
+    expect(input.accept).toBe('application/json,.json');
+    expect(button('Export board').type).toBe('button');
+    const tools = root.querySelector('.board-tools');
+    expect(tools?.contains(button('Export board'))).toBe(true);
+    expect(tools?.contains(input)).toBe(true);
+    expect(tools && root.querySelector('main')?.compareDocumentPosition(tools)).toBe(Node.DOCUMENT_POSITION_PRECEDING);
+  });
+
+  describe('export', () => {
+    it('gives the browser a JSON Blob holding exactly what serializeBoard writes, and clicks a download link for its URL', async () => {
+      seed();
+      const { clicked, create } = stubDownload();
+      button('Export board').click();
+      expect(create).toHaveBeenCalledTimes(1);
+      const blob = exportedBlob(create);
+      expect(blob.type).toBe('application/json');
+      expect(await blob.text()).toBe(serializeBoard(parseBoard(localStorage.getItem(KEY) ?? '')));
+      expect(clicked).toHaveLength(1);
+      expect(clicked[0].href).toBe('blob:loopboard-test');
+    });
+
+    it('exports the board on screen, not what storage holds now', async () => {
+      seed();
+      const onScreen = localStorage.getItem(KEY);
+      localStorage.removeItem(KEY); // another tab cleared the site data
+      const { create } = stubDownload();
+      button('Export board').click();
+      expect(await exportedBlob(create).text()).toBe(onScreen);
+    });
+
+    it.each([
+      ['east of UTC, where the local date is a day ahead', 'Pacific/Kiritimati', Date.UTC(2026, 2, 4, 12), 'loopboard-2026-03-05.json'],
+      ['west of UTC, where the local date is a day behind', 'Pacific/Pago_Pago', Date.UTC(2026, 0, 10, 5), 'loopboard-2026-01-09.json'],
+    ] as const)('names the file with the local date, zero-padded: %s', (_where, zone, instant, name) => {
+      vi.useFakeTimers();
+      process.env.TZ = zone;
+      vi.setSystemTime(instant);
+      expect(new Date().getDate()).not.toBe(new Date().getUTCDate()); // the premise: in this zone the two dates differ
+      seed();
+      const { clicked } = stubDownload();
+      button('Export board').click();
+      expect(clicked[0].download).toBe(name);
+    });
+
+    it('puts the download link in the page for the click and takes it out again', () => {
+      seed();
+      const { clicked } = stubDownload();
+      button('Export board').click();
+      expect(clicked[0].inPage).toBe(true);
+      expect(root.querySelector('a')).toBeNull();
+    });
+
+    it('revokes the object URL after the click: once, and not at once', () => {
+      vi.useFakeTimers();
+      seed();
+      const { clicked, revoke } = stubDownload();
+      button('Export board').click();
+      expect(clicked).toHaveLength(1);
+      expect(revoke).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(60_000);
+      expect(revoke).toHaveBeenCalledTimes(1);
+      expect(revoke).toHaveBeenCalledWith('blob:loopboard-test');
+    });
+  });
+
+  describe('import', () => {
+    it('a valid file asks once and, on OK, replaces the whole board: cards, limits, counts, warnings and what is saved', async () => {
+      seed();
+      const ask = confirmWith(true);
+      await chooseFile(fileOf(IMPORTED));
+      expect(ask).toHaveBeenCalledTimes(1);
+      expect(ask).toHaveBeenCalledWith(IMPORT_CONFIRM);
+      expect(everything()).toEqual({
+        todo: [
+          { title: 'Imported one', note: 'from a file', due: 'Due 2027-01-02' },
+          { title: 'Imported two', note: '', due: '' },
+        ],
+        doing: [],
+        done: [{ title: 'Imported three', note: '', due: '' }],
+      });
+      expect(COLUMN_IDS.map((id) => column(id).querySelector('.count')?.textContent)).toEqual(['2 cards', '0 cards', '1 card']);
+      expect(boxes()).toEqual(['1', '', '3']);
+      expect(warnings()).toEqual(['Over WIP limit: 2 of 1', '', '']);
+      expect(localStorage.getItem(KEY)).toBe(IMPORTED);
+      expect(alerts()[0].textContent).toBe('');
+    });
+
+    it('on Cancel nothing changes: not the board, the storage or the page', async () => {
+      const stored = seedIndented();
+      const page = root.innerHTML;
+      const ask = confirmWith(false);
+      await chooseFile(fileOf(IMPORTED));
+      expect(ask).toHaveBeenCalledTimes(1);
+      expect(localStorage.getItem(KEY)).toBe(stored);
+      expect(root.innerHTML).toBe(page);
+    });
+
+    it.each([
+      ['text that is not JSON', 'not json', NOT_JSON],
+      ['an empty file', '', NOT_JSON],
+      ['a binary file', Uint8Array.from({ length: 256 }, (_, index) => index), NOT_JSON],
+      ['the wrong version', '{"version":2,"columns":{}}', 'version must be 1.'],
+      ['a card without a title', boardText({ todo: [{ id: 'x', title: '', note: '', due: null }] }), 'columns.todo.cards[0].title must be a non-empty string.'],
+      [
+        'a card id used twice',
+        boardText({ todo: [{ id: 'x', title: 'A', note: '', due: null }], doing: [{ id: 'x', title: 'B', note: '', due: null }] }),
+        'Card id "x" is used more than once (again at columns.doing.cards[0].id).',
+      ],
+    ] as const)('%s: the reason is shown in the one alert, and nothing changes', async (_what, content, reason) => {
+      const stored = seedIndented();
+      const before = { cards: everything(), boxes: boxes(), warnings: warnings() };
+      const ask = confirmWith(true);
+      await chooseFile(fileOf(content));
+      expect(ask).not.toHaveBeenCalled();
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0].textContent).toBe(IMPORT_FAILED + reason);
+      expect({ cards: everything(), boxes: boxes(), warnings: warnings() }).toEqual(before);
+      expect(localStorage.getItem(KEY)).toBe(stored);
+    });
+
+    it('cuts a long reason: a name in the file can be any length', async () => {
+      const text = JSON.stringify({ ...JSON.parse(boardText({})), ['x'.repeat(5000)]: 1 });
+      const reason = reasonOf(text);
+      expect(reason.length).toBeGreaterThan(5000); // the premise: parseBoard repeats the name
+      start();
+      await chooseFile(fileOf(text));
+      expect(alerts()[0].textContent).toBe(`${IMPORT_FAILED}${reason.slice(0, 200)}\u2026`);
+    });
+
+    it('a reason that holds markup is shown as text', async () => {
+      const name = '<img src=x onerror=alert(1)>';
+      start();
+      await chooseFile(fileOf(JSON.stringify({ ...JSON.parse(boardText({})), [name]: 1 })));
+      expect(alerts()[0].textContent).toBe(`${IMPORT_FAILED}Unexpected property "${name}" in the file.`);
+      expect(root.querySelector('img')).toBeNull();
+    });
+
+    it('an unreadable file says so in the alert and changes nothing', async () => {
+      const stored = seedIndented();
+      const ask = confirmWith(true);
+      await chooseFile(unreadableFile());
+      expect(ask).not.toHaveBeenCalled();
+      expect(alerts()[0].textContent).toBe(IMPORT_FAILED + UNREADABLE);
+      expect(localStorage.getItem(KEY)).toBe(stored);
+    });
+
+    it('a file that starts with a byte order mark imports', async () => {
+      start();
+      confirmWith(true);
+      await chooseFile(fileOf(Uint8Array.from([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(IMPORTED)])));
+      expect(cardsIn('todo').map((card) => card.title)).toEqual(['Imported one', 'Imported two']);
+      expect(localStorage.getItem(KEY)).toBe(IMPORTED);
+    });
+
+    it('a title of <script>alert(1)</script> imports and renders as text', async () => {
+      const evil = '<script>alert(1)</script>';
+      start();
+      confirmWith(true);
+      await chooseFile(fileOf(boardText({ todo: [{ id: 'x', title: evil, note: '<b>bold</b>', due: null }] })));
+      expect(cardsIn('todo')).toEqual([{ title: evil, note: '<b>bold</b>', due: '' }]);
+      expect(root.querySelector('script')).toBeNull();
+      expect(root.querySelector('b')).toBeNull();
+      expect(root.innerHTML).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    });
+
+    it('export then import into an empty board reproduces the board', async () => {
+      seed();
+      typeLimit('todo', '1');
+      typeLimit('done', '5');
+      const { create } = stubDownload();
+      button('Export board').click();
+      const exported = await exportedBlob(create).text();
+      const shown = { cards: everything(), boxes: boxes(), warnings: warnings() };
+      localStorage.clear();
+      start();
+      expect(everything()).toEqual({ todo: [], doing: [], done: [] }); // the premise: an empty board
+      confirmWith(true);
+      await chooseFile(fileOf(exported));
+      expect({ cards: everything(), boxes: boxes(), warnings: warnings() }).toEqual(shown);
+      expect(localStorage.getItem(KEY)).toBe(exported);
+    });
+
+    it.each([
+      ['accepted', true, () => fileOf(IMPORTED)],
+      ['cancelled', false, () => fileOf(IMPORTED)],
+      ['invalid', true, () => fileOf('not json')],
+      ['unreadable', true, unreadableFile],
+    ] as const)('the box is empty again after a file that is %s', async (_outcome, answer, makeFile) => {
+      seed();
+      confirmWith(answer);
+      await chooseFile(makeFile());
+      expect(importBox().value).toBe('');
+      expect(importBox().files).toHaveLength(0);
+    });
+
+    it('the same file can be chosen twice in a row', async () => {
+      seed();
+      const ask = confirmWith(false);
+      const file = fileOf(IMPORTED);
+      await chooseFile(file);
+      await chooseFile(file);
+      expect(ask).toHaveBeenCalledTimes(2);
+    });
+
+    it('a change event with no file in the box does nothing', async () => {
+      seed();
+      const ask = confirmWith(true);
+      const page = root.innerHTML;
+      importBox().dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((resolve) => realSetTimeout(resolve, 0));
+      expect(ask).not.toHaveBeenCalled();
+      expect(root.innerHTML).toBe(page);
+    });
+
+    it('closes an open edit form, even for a card that the file also holds', async () => {
+      seed();
+      button('Edit "Buy milk"').click();
+      field(editForm(), 'Title').value = 'Half typed';
+      confirmWith(true);
+      await chooseFile(fileOf(boardText({ todo: [{ id: 'a', title: 'Replaced', note: '', due: null }] })));
+      expect(root.querySelector('form.edit-form')).toBeNull();
+      expect(cardsIn('todo')).toEqual([{ title: 'Replaced', note: '', due: '' }]);
+    });
+
+    it('replaces what another tab saved too: the file is the whole board', async () => {
+      seed();
+      const tabB = openSecondTab();
+      add('From A'); // saved by tab A; tab B still shows the old board
+      root = tabB;
+      confirmWith(true);
+      await chooseFile(fileOf(IMPORTED));
+      expect(localStorage.getItem(KEY)).toBe(IMPORTED);
+      expect(cardsIn('todo').map((card) => card.title)).toEqual(['Imported one', 'Imported two']);
+    });
+
+    it('after a failed save the existing alert shows and the imported board stays on screen', async () => {
+      seed();
+      start(storageWith({ setItem: () => { throw new DOMException('full', 'QuotaExceededError'); } }));
+      const stored = localStorage.getItem(KEY);
+      confirmWith(true);
+      await chooseFile(fileOf(IMPORTED));
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0].textContent).toBe(SAVE_FAILED);
+      expect(cardsIn('todo').map((card) => card.title)).toEqual(['Imported one', 'Imported two']);
+      expect(localStorage.getItem(KEY)).toBe(stored);
+    });
+
+    it('the message goes away at the next change that is saved', async () => {
+      seed();
+      await chooseFile(fileOf('not json'));
+      expect(alerts()[0].textContent).toBe(IMPORT_FAILED + NOT_JSON);
+      add('Next');
+      expect(alerts()[0].textContent).toBe('');
+    });
+  });
+
+  it('leaves the time zone as the host had it', () => {
+    expect(new Date(Date.UTC(2026, 0, 1)).getTimezoneOffset()).toBe(HOST_OFFSET);
   });
 });
 
