@@ -103,6 +103,30 @@ h1 {
 
 .card-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 0.5rem;
+}
+
+.column.drop-target {
+  outline: 3px dashed currentColor;
+  outline-offset: 2px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+/* Visually hidden, but not display: none, so assistive technology still reads it. */
+.move-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+:focus-visible {
+  outline: 3px solid currentColor;
+  outline-offset: 2px;
 }

@@ -1,4 +1,4 @@
-import { COLUMNS, addCard, deleteCard, editCard, emptyBoard, type Board, type Card } from '../board';
+import { COLUMNS, addCard, deleteCard, editCard, emptyBoard, moveCard, type Board, type Card, type ColumnId } from '../board';
 import { loadBoard, saveBoard } from '../storage';
 
 export type AppDeps = {
@@ -8,6 +8,7 @@ export type AppDeps = {
 
 const LOAD_FAILED = 'The saved board could not be read, so the board starts empty.';
 const SAVE_FAILED = 'The board could not be saved. Your changes may be lost when you reload.';
+const CARD_TYPE = 'application/x-loopboard-card'; // what a dragged card puts in dataTransfer: its id
 
 function make<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text = ''): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
@@ -46,6 +47,8 @@ function cardFields(card?: Card) {
   const labelled = (text: string, control: HTMLElement): HTMLLabelElement => {
     const label = make('label');
     label.append(make('span', '', text), control);
+    // In the edit form each control's name also holds the card's stored title, never the typed one, so it does not change while typing.
+    if (card) control.setAttribute('aria-label', `${text} for "${card.title}"`);
     return label;
   };
   return {
@@ -76,6 +79,9 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
   const boardAlert = make('p', 'board-alert', startupMessage);
   boardAlert.setAttribute('role', 'alert');
 
+  const status = make('p', 'move-status');
+  status.setAttribute('role', 'status');
+
   const addFields = cardFields();
   const addError = errorLine();
   const addForm = make('form', 'add-form');
@@ -91,12 +97,33 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
     const header = make('div', 'column-header');
     header.append(heading, count);
     const list = make('ul', 'cards');
+    list.setAttribute('aria-label', `${title} cards`);
     const section = make('section', 'column');
     section.dataset.column = id;
     section.setAttribute('aria-labelledby', heading.id);
     section.append(header);
     if (id === 'todo') section.append(addForm);
     section.append(list);
+    // A card can be dropped anywhere on the column's section, not only on its list.
+    const allowDrop = (event: DragEvent): void => {
+      if (!event.dataTransfer?.types.includes(CARD_TYPE)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      section.classList.add('drop-target');
+    };
+    section.addEventListener('dragenter', allowDrop);
+    section.addEventListener('dragover', allowDrop);
+    // dragleave also fires when the pointer moves from the section into one of its own elements: keep the style then.
+    section.addEventListener('dragleave', (event) => {
+      if (!(event.relatedTarget instanceof Node && section.contains(event.relatedTarget))) section.classList.remove('drop-target');
+    });
+    section.addEventListener('drop', (event) => {
+      const cardId = event.dataTransfer?.getData(CARD_TYPE);
+      if (!cardId) return; // not one of our cards
+      event.preventDefault();
+      clearDropTargets();
+      moveTo(cardId, { id, title });
+    });
     return { id, heading, count, list, section };
   });
 
@@ -128,6 +155,35 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
     items.get(id)?.querySelector<HTMLElement>(selector)?.focus();
   }
 
+  function clearDropTargets(): void {
+    for (const column of columns) column.section.classList.remove('drop-target');
+  }
+
+  // A live region speaks what changes in it. Clearing it first and setting the text in a later task makes a message that
+  // repeats the previous one a change too, and it comes after the focus move, which speaks first.
+  function announce(message: string): void {
+    status.textContent = '';
+    setTimeout(() => {
+      status.textContent = message;
+    }, 100);
+  }
+
+  // Used by the Move buttons and by a drop. When moveCard returns the board it was given there is nothing to do: the card is
+  // already in that column, or another tab deleted it. Then nothing is saved, redrawn or announced.
+  function moveTo(id: string, to: { id: ColumnId; title: string }): void {
+    const before = latest();
+    const after = moveCard(before, id, to.id);
+    if (after === before) return;
+    commit(after);
+    const item = items.get(id);
+    if (item) {
+      item.tabIndex = -1;
+      item.focus();
+    }
+    const { cards } = after.columns[to.id]; // moveCard puts the card last
+    announce(`Moved "${cards[cards.length - 1].title}" to ${to.title}`);
+  }
+
   function startEdit(id: string): void {
     editingId = id;
     render();
@@ -140,8 +196,15 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
     focusCard(id, 'button.edit');
   }
 
-  function cardItem(card: Card, heading: HTMLElement): HTMLLIElement {
+  function cardItem(card: Card, heading: HTMLElement, own: ColumnId): HTMLLIElement {
     const item = make('li', 'card');
+    item.draggable = true;
+    item.addEventListener('dragstart', (event) => {
+      if (!event.dataTransfer) return;
+      event.dataTransfer.setData(CARD_TYPE, card.id);
+      event.dataTransfer.effectAllowed = 'move';
+    });
+    item.addEventListener('dragend', clearDropTargets);
     const edit = button('Edit', 'button', 'edit');
     edit.setAttribute('aria-label', `Edit "${card.title}"`);
     edit.addEventListener('click', () => startEdit(card.id));
@@ -151,8 +214,17 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
       commit(deleteCard(latest(), card.id));
       heading.focus();
     });
+    const moves = COLUMNS.filter((target) => target.id !== own).map((target) => {
+      const arrow = make('span', 'arrow', '\u2192');
+      arrow.setAttribute('aria-hidden', 'true');
+      const move = button('', 'button', 'move');
+      move.append(arrow, ` ${target.title}`);
+      move.setAttribute('aria-label', `Move "${card.title}" to ${target.title}`);
+      move.addEventListener('click', () => moveTo(card.id, target));
+      return move;
+    });
     const actions = make('div', 'card-actions');
-    actions.append(edit, remove);
+    actions.append(edit, remove, ...moves);
     item.append(make('h3', 'card-title', card.title));
     if (card.note !== '') item.append(make('p', 'card-note', card.note));
     if (card.due !== null) item.append(make('p', 'card-due', `Due ${card.due}`));
@@ -164,10 +236,13 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
     const fields = cardFields(card);
     const error = errorLine();
     const cancel = button('Cancel');
+    cancel.setAttribute('aria-label', `Cancel editing "${card.title}"`);
     cancel.addEventListener('click', () => stopEdit(card.id));
+    const save = button('Save', 'submit');
+    save.setAttribute('aria-label', `Save "${card.title}"`);
     const form = make('form', 'edit-form');
     form.noValidate = true;
-    form.append(...fields.labels, error, button('Save', 'submit'), cancel);
+    form.append(...fields.labels, error, save, cancel);
     form.addEventListener('submit', (event) => {
       event.preventDefault();
       let next: Board;
@@ -194,7 +269,7 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
       column.count.textContent = `${cards.length} ${cards.length === 1 ? 'card' : 'cards'}`;
       column.list.replaceChildren(
         ...cards.map((card) => {
-          const item = card.id === editingId ? editItem(card) : cardItem(card, column.heading);
+          const item = card.id === editingId ? editItem(card) : cardItem(card, column.heading, column.id);
           items.set(card.id, item);
           return item;
         }),
@@ -221,5 +296,5 @@ export function mountApp(root: HTMLElement, { storage, newId }: AppDeps): void {
   const main = make('main', 'board');
   main.append(...columns.map((column) => column.section));
   render();
-  root.replaceChildren(make('h1', '', 'LoopBoard'), boardAlert, main);
+  root.replaceChildren(make('h1', '', 'LoopBoard'), boardAlert, status, main);
 }

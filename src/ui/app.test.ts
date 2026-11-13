@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { addCard, emptyBoard, type Card, type ColumnId } from '../board';
 import { parseBoard, serializeBoard } from '../storage';
 import { mountApp } from './app';
@@ -12,6 +12,7 @@ const LOAD_FAILED = 'The saved board could not be read, so the board starts empt
 const BLANK_TITLE = 'A card needs a title.';
 const BAD_DUE = 'The due date must be empty or a real date written YYYY-MM-DD.';
 const COLUMN_IDS = ['todo', 'doing', 'done'] as const;
+const CARD_TYPE = 'application/x-loopboard-card';
 
 let root: HTMLElement;
 let counter: number;
@@ -106,7 +107,7 @@ function alerts(): Element[] {
 function rename(from: string, to: string): void {
   button(`Edit "${from}"`).click();
   field(editForm(), 'Title').value = to;
-  button('Save').click();
+  button(`Save "${from}"`).click();
 }
 
 // Two tabs of one browser share one localStorage. The second tab is another root over the same storage; the helpers act on
@@ -125,11 +126,72 @@ function titlesByColumn(read: (id: ColumnId) => { title: string }[]) {
   return { todo: read('todo').map((card) => card.title), doing: read('doing').map((card) => card.title), done: read('done').map((card) => card.title) };
 }
 
+// jsdom has neither DragEvent nor DataTransfer. A drag event here is a MouseEvent (it carries relatedTarget) with a stub dataTransfer.
+function transferOf(data: Record<string, string> = {}) {
+  const store = new Map(Object.entries(data));
+  return {
+    effectAllowed: 'uninitialized',
+    dropEffect: 'none',
+    get types() {
+      return [...store.keys()];
+    },
+    setData: (type: string, value: string) => {
+      store.set(type, value);
+    },
+    getData: (type: string) => store.get(type) ?? '',
+  };
+}
+
+function fire(target: Element, type: string, transfer: object, relatedTarget: Element | null = null): MouseEvent {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, relatedTarget });
+  Object.defineProperty(event, 'dataTransfer', { value: transfer });
+  target.dispatchEvent(event);
+  return event;
+}
+
+function cardItem(title: string): HTMLLIElement {
+  const found = [...root.querySelectorAll<HTMLLIElement>('li.card')].find((item) => item.querySelector('h3')?.textContent === title);
+  if (!found) throw new Error(`no card titled ${title}`);
+  return found;
+}
+
+// `selector` '' is the column's section itself; anything else is an element inside it.
+function within(id: ColumnId, selector: string): Element {
+  const found = selector === '' ? column(id) : column(id).querySelector(selector);
+  if (!found) throw new Error(`nothing matches "${selector}" in ${id}`);
+  return found;
+}
+
+// A whole drag: the card is picked up, held over `target`, dropped there, and the drag ends on the card that was picked up.
+function drag(title: string, target: Element): void {
+  const source = cardItem(title);
+  const transfer = transferOf();
+  fire(source, 'dragstart', transfer);
+  fire(target, 'dragenter', transfer);
+  fire(target, 'dragover', transfer);
+  fire(target, 'drop', transfer);
+  fire(source, 'dragend', transfer);
+}
+
+function status(): HTMLElement {
+  const found = root.querySelector<HTMLElement>('.move-status');
+  if (!found) throw new Error('no move status');
+  return found;
+}
+
+function marked(): boolean[] {
+  return COLUMN_IDS.map((id) => column(id).classList.contains('drop-target'));
+}
+
 beforeEach(() => {
   localStorage.clear();
   counter = 0;
   root = document.createElement('div');
   document.body.replaceChildren(root);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('start-up and layout', () => {
@@ -256,7 +318,7 @@ describe('edit', () => {
     field(editForm(), 'Title').value = '  Buy oat milk ';
     field(editForm(), 'Note').value = '';
     field(editForm(), 'Due date').value = '';
-    button('Save').click();
+    button('Save "Buy milk"').click();
     expect(root.querySelector('form.edit-form')).toBeNull();
     expect(cardsIn('todo')).toEqual([
       { title: 'Buy oat milk', note: '', due: '' },
@@ -274,7 +336,7 @@ describe('edit', () => {
     const before = localStorage.getItem(KEY);
     button('Edit "Buy milk"').click();
     field(editForm(), 'Title').value = 'Changed';
-    button('Cancel').click();
+    button('Cancel editing "Buy milk"').click();
     expect(root.querySelector('form.edit-form')).toBeNull();
     expect(cardsIn('todo')[0]).toEqual({ title: 'Buy milk', note: '2 litres', due: 'Due 2026-11-20' });
     expect(localStorage.getItem(KEY)).toBe(before);
@@ -287,12 +349,12 @@ describe('edit', () => {
     button('Edit "Buy milk"').click();
     field(editForm(), 'Title').value = '  ';
     field(editForm(), 'Note').value = 'kept';
-    button('Save').click();
+    button('Save "Buy milk"').click();
     expect(editForm().querySelector('.form-error')?.textContent).toBe(BLANK_TITLE);
     expect(field(editForm(), 'Note').value).toBe('kept');
     expect(localStorage.getItem(KEY)).toBe(before);
     field(editForm(), 'Title').value = 'Fixed';
-    button('Save').click();
+    button('Save "Buy milk"').click(); // named after the stored title, not the typed one
     expect(cardsIn('todo')[0].title).toBe('Fixed');
     expect(root.querySelector('form.edit-form')).toBeNull();
   });
@@ -341,10 +403,10 @@ describe('saving and loading', () => {
     expect(saved).toHaveLength(1);
     add('');
     button('Edit "New"').click();
-    button('Cancel').click();
+    button('Cancel editing "New"').click();
     expect(saved).toHaveLength(1);
     button('Edit "New"').click();
-    button('Save').click();
+    button('Save "New"').click();
     expect(saved).toHaveLength(2);
     button('Delete "New"').click();
     expect(saved).toHaveLength(3);
@@ -358,7 +420,7 @@ describe('saving and loading', () => {
     add('Throw away');
     button('Edit "Write report"').click();
     field(editForm(), 'Note').value = 'Due soon';
-    button('Save').click();
+    button('Save "Write report"').click();
     button('Delete "Throw away"').click();
     const before = everything();
     expect(before.todo).toHaveLength(2);
@@ -424,6 +486,8 @@ describe('two tabs on one storage', () => {
     ['saves an edit of a card the other tab deleted (it stays deleted)', () => rename('Write report', 'Report v2'), { todo: ['Buy milk', 'From A'], doing: ['Fix bike (A)'], done: ['Pay rent'] }],
     ['deletes another card', () => button('Delete "Pay rent"').click(), { todo: ['Buy milk', 'From A'], doing: ['Fix bike (A)'], done: [] }],
     ['deletes a card the other tab deleted', () => button('Delete "Write report"').click(), { todo: ['Buy milk', 'From A'], doing: ['Fix bike (A)'], done: ['Pay rent'] }],
+    ['moves a card to another column', () => button('Move "Buy milk" to Done').click(), { todo: ['From A'], doing: ['Fix bike (A)'], done: ['Pay rent', 'Buy milk'] }],
+    ['moves a card the other tab renamed', () => button('Move "Fix bike" to Done').click(), { todo: ['Buy milk', 'From A'], doing: [], done: ['Pay rent', 'Fix bike (A)'] }],
   ] as const)('a stale tab that %s keeps what the other tab saved', (_what, act, expected) => {
     staleTab();
     act();
@@ -458,6 +522,28 @@ describe('two tabs on one storage', () => {
     add('Third'); // storage is trusted again, so From B is kept
     expect(titlesByColumn(storedCards).todo).toEqual(['First', 'Second', 'From B', 'Third']);
   });
+
+  it('a stale tab that moves a card the other tab renamed announces the title that is stored', () => {
+    vi.useFakeTimers();
+    staleTab();
+    button('Move "Fix bike" to Done').click();
+    vi.advanceTimersByTime(100);
+    expect(status().textContent).toBe('Moved "Fix bike (A)" to Done');
+  });
+
+  it('a stale tab that moves a card the other tab deleted changes nothing: no save, no announcement, the button keeps focus', () => {
+    vi.useFakeTimers();
+    staleTab();
+    const before = localStorage.getItem(KEY);
+    const pressed = button('Move "Write report" to Doing');
+    pressed.focus();
+    pressed.click();
+    expect(localStorage.getItem(KEY)).toBe(before);
+    expect(alerts()[0].textContent).toBe('');
+    expect(document.activeElement).toBe(pressed);
+    vi.advanceTimersByTime(1000);
+    expect(status().textContent).toBe('');
+  });
 });
 
 describe('titles with line breaks', () => {
@@ -472,7 +558,7 @@ describe('titles with line breaks', () => {
 
   it.each(TITLES)('Save without touching the title keeps %j exactly', (title) => {
     openEditor(title);
-    button('Save').click();
+    button(`Save "${title}"`).click();
     expect(storedCards('todo')).toEqual([{ id: 'a', title, note: 'a note', due: null }]);
     expect(cardsIn('todo')[0].title).toBe(title);
   });
@@ -480,15 +566,347 @@ describe('titles with line breaks', () => {
   it('Save after changing only the note keeps the title', () => {
     openEditor(TITLES[0]);
     field(editForm(), 'Note').value = 'changed';
-    button('Save').click();
+    button(`Save "${TITLES[0]}"`).click();
     expect(storedCards('todo')).toEqual([{ id: 'a', title: TITLES[0], note: 'changed', due: null }]);
   });
 
   it('Save after typing a new title stores what was typed', () => {
     openEditor(TITLES[0]);
     field(editForm(), 'Title').value = 'Replaced';
-    button('Save').click();
+    button(`Save "${TITLES[0]}"`).click(); // named after the stored title, not the typed one
     expect(storedCards('todo')[0].title).toBe('Replaced');
+  });
+
+  it.each(TITLES)('the editor of %j has names that hold the title exactly as stored', (title) => {
+    openEditor(title);
+    const names = [...editForm().querySelectorAll('input, textarea, button')].map((control) => control.getAttribute('aria-label'));
+    expect(names).toEqual([`Title for "${title}"`, `Note for "${title}"`, `Due date for "${title}"`, `Save "${title}"`, `Cancel editing "${title}"`]);
+  });
+});
+
+describe('moving cards', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  describe('Move buttons', () => {
+    it.each([
+      ['Buy milk', ['Doing', 'Done']],
+      ['Fix bike', ['To do', 'Done']],
+      ['Pay rent', ['To do', 'Doing']],
+    ] as const)('"%s" has Edit, Delete, then one Move button for each other column', (title, others) => {
+      seed();
+      const buttons = [...cardItem(title).querySelectorAll('button')];
+      expect(buttons.map((control) => control.getAttribute('aria-label'))).toEqual([
+        `Edit "${title}"`,
+        `Delete "${title}"`,
+        ...others.map((name) => `Move "${title}" to ${name}`),
+      ]);
+      expect(buttons.map((control) => control.type)).toEqual(buttons.map(() => 'button'));
+      expect(buttons.slice(2).map((control) => control.textContent)).toEqual(others.map((name) => `\u2192 ${name}`));
+    });
+
+    it('the arrow in a Move button is hidden from assistive technology and is not part of its name', () => {
+      seed();
+      const moves = [...root.querySelectorAll('button.move')];
+      expect(moves).toHaveLength(8);
+      for (const move of moves) {
+        const arrow = move.querySelector('.arrow');
+        expect(arrow?.textContent).toBe('\u2192');
+        expect(arrow?.getAttribute('aria-hidden')).toBe('true');
+        expect(move.getAttribute('aria-label')).not.toContain('\u2192');
+      }
+    });
+
+    it.each([
+      ['Buy milk', 'Doing', 'doing'],
+      ['Buy milk', 'Done', 'done'],
+      ['Fix bike', 'To do', 'todo'],
+      ['Fix bike', 'Done', 'done'],
+      ['Pay rent', 'To do', 'todo'],
+      ['Pay rent', 'Doing', 'doing'],
+    ] as const)('Move "%s" to %s puts the card at the end of that column and saves', (title, name, id) => {
+      seed();
+      const expected = titlesByColumn(cardsIn);
+      for (const other of COLUMN_IDS) expected[other] = expected[other].filter((candidate) => candidate !== title);
+      expected[id].push(title);
+      button(`Move "${title}" to ${name}`).click();
+      expect(titlesByColumn(cardsIn)).toEqual(expected);
+      expect(titlesByColumn(storedCards)).toEqual(expected);
+      expect(COLUMN_IDS.map((other) => column(other).querySelector('.count')?.textContent)).toEqual(
+        COLUMN_IDS.map((other) => `${expected[other].length} ${expected[other].length === 1 ? 'card' : 'cards'}`),
+      );
+    });
+
+    it("keeps the card's id, note and due date", () => {
+      seed();
+      button('Move "Buy milk" to Done').click();
+      expect(storedCards('done')).toEqual([
+        { id: 'd', title: 'Pay rent', note: 'Paid online', due: '2026-11-01' },
+        { id: 'a', title: 'Buy milk', note: '2 litres', due: '2026-11-20' },
+      ]);
+      expect(cardsIn('done')[1]).toEqual({ title: 'Buy milk', note: '2 litres', due: 'Due 2026-11-20' });
+    });
+  });
+
+  describe('after a move', () => {
+    it('focus is on the moved card in its new column (tabindex -1), not on <body>, after a Move button', () => {
+      seed();
+      const pressed = button('Move "Buy milk" to Doing');
+      pressed.focus();
+      pressed.click();
+      expect(pressed.isConnected).toBe(false); // the redraw removed the button that had focus
+      const focused = document.activeElement;
+      expect(focused).not.toBe(document.body);
+      expect(focused).toBe(cardItem('Buy milk'));
+      expect(focused?.tagName).toBe('LI');
+      expect(focused?.getAttribute('tabindex')).toBe('-1');
+      expect(column('doing').contains(focused)).toBe(true);
+    });
+
+    it('focus is on the moved card in its new column after a drop too', () => {
+      seed();
+      drag('Fix bike', column('done'));
+      const focused = document.activeElement;
+      expect(focused).toBe(cardItem('Fix bike'));
+      expect(focused?.getAttribute('tabindex')).toBe('-1');
+      expect(column('done').contains(focused)).toBe(true);
+    });
+
+    it('every tabindex on the page is -1', () => {
+      seed();
+      button('Move "Buy milk" to Doing').click();
+      const tabindexes = [...root.querySelectorAll('[tabindex]')];
+      expect(tabindexes).toHaveLength(4); // the three column headings and the moved card
+      expect(tabindexes.every((element) => element.getAttribute('tabindex') === '-1')).toBe(true);
+    });
+
+    it('announces Moved "<title>" to <Column> in the role="status" region, after a short delay', () => {
+      seed();
+      expect(status().getAttribute('role')).toBe('status');
+      expect(status().textContent).toBe('');
+      button('Move "Buy milk" to Doing').click();
+      expect(status().textContent).toBe('');
+      vi.advanceTimersByTime(100);
+      expect(status().textContent).toBe('Moved "Buy milk" to Doing');
+      drag('Pay rent', column('todo'));
+      vi.advanceTimersByTime(100);
+      expect(status().textContent).toBe('Moved "Pay rent" to To do');
+    });
+
+    it('the status region is one element outside the columns, and the one role="alert" is still there', () => {
+      seed();
+      expect(root.querySelectorAll('.move-status')).toHaveLength(1);
+      expect(root.querySelector('main')?.contains(status())).toBe(false);
+      expect(status().hasAttribute('hidden')).toBe(false);
+      expect(alerts()).toHaveLength(1);
+    });
+
+    it('announces the same message twice in a row: the region is empty in between', () => {
+      let board = addCard(emptyBoard(), 'todo', { id: 'a', title: 'Same', note: '', due: null });
+      board = addCard(board, 'todo', { id: 'b', title: 'Same', note: '', due: null });
+      localStorage.setItem(KEY, serializeBoard(board));
+      start();
+      const seen: string[] = [];
+      cardItem('Same').querySelector<HTMLButtonElement>('button.move')?.click(); // the first Same, to Doing
+      vi.advanceTimersByTime(100);
+      seen.push(status().textContent ?? '');
+      cardItem('Same').querySelector<HTMLButtonElement>('button.move')?.click(); // the other Same, to Doing
+      seen.push(status().textContent ?? '');
+      vi.advanceTimersByTime(100);
+      seen.push(status().textContent ?? '');
+      expect(seen).toEqual(['Moved "Same" to Doing', '', 'Moved "Same" to Doing']);
+    });
+
+    it('a move whose save fails stays on screen, shows the one alert, and is still announced', () => {
+      seed();
+      start(storageWith({ setItem: () => { throw new DOMException('full', 'QuotaExceededError'); } }));
+      button('Move "Buy milk" to Doing').click();
+      vi.advanceTimersByTime(100);
+      expect(cardsIn('doing').map((card) => card.title)).toEqual(['Fix bike', 'Buy milk']);
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0].textContent).toBe(SAVE_FAILED);
+      expect(status().textContent).toBe('Moved "Buy milk" to Doing');
+    });
+  });
+
+  describe('drag and drop', () => {
+    it('cards are draggable, except the one being edited, which has no Move buttons either', () => {
+      seed();
+      expect([...root.querySelectorAll('li.card')].map((item) => item.getAttribute('draggable'))).toEqual(['true', 'true', 'true', 'true']);
+      button('Edit "Buy milk"').click();
+      const editing = editForm().closest('li');
+      expect(editing?.hasAttribute('draggable')).toBe(false);
+      expect(editing?.querySelector('.move')).toBeNull();
+      expect(root.querySelectorAll('li.card[draggable="true"]')).toHaveLength(3);
+    });
+
+    it('dragstart puts the card id in dataTransfer under the card type and allows only a move', () => {
+      seed();
+      const transfer = transferOf();
+      fire(cardItem('Fix bike'), 'dragstart', transfer);
+      expect(transfer.types).toEqual([CARD_TYPE]);
+      expect(transfer.getData(CARD_TYPE)).toBe('c');
+      expect(transfer.effectAllowed).toBe('move');
+    });
+
+    it.each([
+      ['Buy milk', 'doing'],
+      ['Fix bike', 'done'],
+      ['Pay rent', 'todo'],
+    ] as const)('dropping "%s" on the %s column region moves it to the end of that column and saves', (title, id) => {
+      seed();
+      const expected = titlesByColumn(cardsIn);
+      for (const other of COLUMN_IDS) expected[other] = expected[other].filter((candidate) => candidate !== title);
+      expected[id].push(title);
+      drag(title, column(id));
+      expect(titlesByColumn(cardsIn)).toEqual(expected);
+      expect(titlesByColumn(storedCards)).toEqual(expected);
+    });
+
+    it.each([
+      ['its heading', 'h2'],
+      ['its count', '.count'],
+      ['its card list', 'ul'],
+      ['a card in it', 'li'],
+    ])('a drop on %s, inside the column region, moves the card there', (_where, selector) => {
+      seed();
+      drag('Buy milk', within('done', selector));
+      expect(titlesByColumn(storedCards)).toEqual({ todo: ['Write report'], doing: ['Fix bike'], done: ['Pay rent', 'Buy milk'] });
+    });
+
+    it('dropping a card on its own column changes nothing: nothing saved, redrawn, announced or focused', () => {
+      seed();
+      const saved: string[] = [];
+      start(storageWith({ setItem: (key, value) => { saved.push(value); localStorage.setItem(key, value); } }));
+      const before = everything();
+      const item = cardItem('Buy milk');
+      button('Edit "Write report"').focus();
+      drag('Buy milk', column('todo'));
+      expect(saved).toEqual([]);
+      expect(everything()).toEqual(before);
+      expect(cardItem('Buy milk')).toBe(item);
+      expect(document.activeElement).toBe(button('Edit "Write report"'));
+      vi.advanceTimersByTime(1000);
+      expect(status().textContent).toBe('');
+    });
+
+    it('dragenter and dragover accept one of our cards: cancelled, move effect, and only that column is marked', () => {
+      seed();
+      const transfer = transferOf();
+      fire(cardItem('Buy milk'), 'dragstart', transfer);
+      expect(fire(column('doing'), 'dragenter', transfer).defaultPrevented).toBe(true);
+      expect(fire(column('doing'), 'dragover', transfer).defaultPrevented).toBe(true);
+      expect(transfer.dropEffect).toBe('move');
+      expect(marked()).toEqual([false, true, false]);
+    });
+
+    it('a drag that is not one of our cards is ignored: not accepted, not marked, and a drop changes nothing', () => {
+      seed();
+      const before = localStorage.getItem(KEY);
+      for (const transfer of [transferOf({ 'text/plain': 'a' }), transferOf({ Files: '' }), transferOf()]) {
+        expect(fire(column('done'), 'dragover', transfer).defaultPrevented).toBe(false);
+        expect(marked()).toEqual([false, false, false]);
+        expect(fire(column('done'), 'drop', transfer).defaultPrevented).toBe(false);
+      }
+      expect(localStorage.getItem(KEY)).toBe(before);
+      expect(cardsIn('done')).toHaveLength(1);
+    });
+
+    it('a drop of a card id that no card has changes nothing', () => {
+      seed();
+      const before = localStorage.getItem(KEY);
+      fire(column('done'), 'drop', transferOf({ [CARD_TYPE]: 'gone' }));
+      expect(localStorage.getItem(KEY)).toBe(before);
+      expect(everything().done).toHaveLength(1);
+      vi.advanceTimersByTime(1000);
+      expect(status().textContent).toBe('');
+    });
+
+    it("the drop-target style stays while the pointer moves between the column's own elements, and goes when it leaves", () => {
+      seed();
+      const transfer = transferOf({ [CARD_TYPE]: 'a' });
+      const doing = column('doing');
+      const card = within('doing', 'li');
+      fire(doing, 'dragover', transfer);
+      expect(marked()).toEqual([false, true, false]);
+      fire(doing, 'dragleave', transfer, card); // from the section into a card
+      fire(card, 'dragleave', transfer, doing); // from the card back to the section
+      fire(card, 'dragleave', transfer, within('doing', 'h2')); // from a card to the heading
+      expect(marked()).toEqual([false, true, false]);
+      fire(card, 'dragleave', transfer, column('done')); // into another column
+      expect(marked()).toEqual([false, false, false]);
+      fire(doing, 'dragover', transfer);
+      fire(doing, 'dragleave', transfer, null); // out of the window
+      expect(marked()).toEqual([false, false, false]);
+    });
+
+    it('dragend clears the style of every column, and a drop clears it too', () => {
+      seed();
+      const transfer = transferOf();
+      fire(cardItem('Buy milk'), 'dragstart', transfer);
+      fire(column('doing'), 'dragover', transfer);
+      fire(column('done'), 'dragover', transfer); // two columns marked, as if a dragleave never came
+      expect(marked()).toEqual([false, true, true]);
+      fire(cardItem('Buy milk'), 'dragend', transfer);
+      expect(marked()).toEqual([false, false, false]);
+      fire(column('done'), 'dragover', transfer);
+      fire(column('done'), 'drop', transfer);
+      expect(marked()).toEqual([false, false, false]);
+    });
+  });
+
+  describe('ARIA', () => {
+    it('each card list has an aria-label naming its column', () => {
+      start();
+      expect(COLUMN_IDS.map((id) => within(id, 'ul').getAttribute('aria-label'))).toEqual(['To do cards', 'Doing cards', 'Done cards']);
+    });
+
+    it('every button on a card has a name that contains the card title', () => {
+      seed();
+      const items = [...root.querySelectorAll('li.card')];
+      expect(items).toHaveLength(4);
+      for (const item of items) {
+        const title = item.querySelector('h3')?.textContent ?? '';
+        const buttons = [...item.querySelectorAll('button')];
+        expect(buttons).toHaveLength(4); // Edit, Delete and two Move buttons
+        for (const control of buttons) expect(control.getAttribute('aria-label')).toContain(`"${title}"`);
+      }
+    });
+
+    it('every control of an open edit form has a name that contains the stored title and keeps its visible caption', () => {
+      seed();
+      const captions = ['Title', 'Note', 'Due date', 'Save', 'Cancel'];
+      for (const title of ['Buy milk', 'Write report', 'Fix bike', 'Pay rent']) {
+        button(`Edit "${title}"`).click();
+        const form = editForm();
+        expect([...form.querySelectorAll('label, button')].map((item) => item.textContent)).toEqual(captions);
+        const names = [...form.querySelectorAll('input, textarea, button')].map((control) => control.getAttribute('aria-label') ?? '');
+        expect(names).toEqual([`Title for "${title}"`, `Note for "${title}"`, `Due date for "${title}"`, `Save "${title}"`, `Cancel editing "${title}"`]);
+        captions.forEach((caption, index) => expect(names[index]).toContain(caption));
+      }
+    });
+
+    it('the names in an open edit form do not change while the person types', () => {
+      seed();
+      button('Edit "Buy milk"').click();
+      const names = () => [...editForm().querySelectorAll('input, textarea, button')].map((control) => control.getAttribute('aria-label'));
+      const opened = names();
+      expect(opened[0]).toBe('Title for "Buy milk"');
+      for (const [caption, value] of [['Title', 'Typed title'], ['Note', 'Typed note'], ['Due date', '2027-01-02']] as const) {
+        const control = field(editForm(), caption);
+        control.value = value;
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      expect(names()).toEqual(opened);
+    });
+
+    it('the add form keeps its plain names (its visible captions) while an edit form is open', () => {
+      seed();
+      button('Edit "Buy milk"').click();
+      expect([...addForm().querySelectorAll('input, textarea, button')].map((control) => control.getAttribute('aria-label'))).toEqual([null, null, null, null]);
+      expect([...addForm().querySelectorAll('label, button')].map((item) => item.textContent)).toEqual(['Title', 'Note', 'Due date', 'Add card']);
+    });
   });
 });
 
@@ -504,7 +922,7 @@ describe('untrusted text', () => {
     button(`Edit "${evil}"`).click();
     expect(field(editForm(), 'Title').value).toBe(evil);
     expect(root.querySelector('img')).toBeNull();
-    button('Cancel').click();
+    button(`Cancel editing "${evil}"`).click();
     root.replaceChildren();
     start();
     expect(root.querySelector('img')).toBeNull();
